@@ -22,7 +22,7 @@ let package = Package(
         ),
         .package(
             url: "https://github.com/PureSwift/GATT.git",
-            branch: "master"
+            .upToNextMajor(from: "3.0.0")
         ),
     ],
     targets: [
