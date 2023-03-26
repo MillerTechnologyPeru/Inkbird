@@ -10,7 +10,7 @@ import AppleProductTypes
 let package = Package(
     name: "InkbirdApp",
     platforms: [
-        .iOS("15.0")
+        .iOS("15.2")
     ],
     products: [
         .iOSApplication(
