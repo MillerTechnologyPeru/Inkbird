@@ -52,7 +52,7 @@ private extension InkbirdAdvertisementRow.Thermometer {
     }
     
     var batteryLevel: String {
-        advertisement.manufacturingData.batteryLevel.description
+        advertisement.manufacturingData.batteryLevel.rawValue.description
     }
     
     var temperature: String {
