@@ -76,7 +76,7 @@ public extension MockAdvertisementData {
         manufacturerData: ManufacturerSpecificData(companyIdentifier: 0x0864, additionalData: Data([0xD2, 0x1C, 0x00, 0xFF, 0x51, 0x64, 0x08])),
         txPowerLevel: nil,
         serviceData: nil,
-        serviceUUIDs: nil,
+        serviceUUIDs: [.inkbirdThermostat],
         solicitedServiceUUIDs: nil
     )
 }
