@@ -111,6 +111,8 @@ final class InkbirdTests: XCTestCase {
             let advertisementData: LowEnergyAdvertisingData = [0x04, 0x09, 0x73, 0x70, 0x73, 0x0A, 0xFF, 0x64, 0x08, 0xD2, 0x1C, 0x00, 0xFF, 0x51, 0x64, 0x08]
             
             XCTAssertEqual(advertisementData.localName, "sps")
+            XCTAssertEqual(advertisementData.manufacturerData?.companyIdentifier.rawValue, 0x0864)
+            XCTAssertEqual(advertisementData.manufacturerData?.additionalData, Data([0xD2, 0x1C, 0x00, 0xFF, 0x51, 0x64, 0x08]))
             
             guard let thermometer = InkbirdAdvertisement.Thermometer(advertisementData) else {
                 XCTFail("Unable to parse.")
