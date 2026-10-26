@@ -55,7 +55,7 @@ public extension InkbirdAdvertisement.Thermometer {
 
 internal extension InkbirdAdvertisement.Thermometer.ManufacturingData {
     
-    init?(_ manufacturerSpecificData: GATT.ManufacturerSpecificData) {
+    init?<T: DataContainer>(_ manufacturerSpecificData: GATT.ManufacturerSpecificData<T>) {
         guard manufacturerSpecificData.additionalData.count == 7
             else {
             return nil
