@@ -45,9 +45,10 @@ public extension InkbirdReading {
 /// Settings from the `cfg data` characteristic (`FFF1`).
 public struct InkbirdSettings: Equatable, Hashable, Sendable {
 
-    /// Time between history records, in seconds.
+    /// Time between samples, in seconds. The record counter (`FFF5`) goes up at this rate.
     ///
-    /// Read from bytes 7–8. Only `120` has been seen, so whether the field is one or two bytes is unconfirmed.
+    /// History records were stored less often than this on a real sensor. Read from bytes 7–8;
+    /// only `120` has been seen, so whether the field is one or two bytes is unconfirmed.
     public let interval: UInt16
 
     /// The 20-byte value, for fields not decoded yet.
@@ -100,12 +101,6 @@ public enum InkbirdHistoryBuffer: CaseIterable, Sendable {
 
 public extension InkbirdHistoryBuffer {
 
-    /// Records each buffer holds. The Inkbird app stops reading at this count.
-    static var capacity: Int { 6000 }
-
-    /// Size of a record in bytes.
-    static var recordSize: Int { 2 }
-
     var header: InkbirdHistoryRequest {
         switch self {
         case .temperature: return .temperatureHeader
@@ -146,6 +141,21 @@ internal enum InkbirdHistoryReply {
             return nil
         }
         return UInt16(littleEndian: UInt16(bytes: (bytes[0], bytes[1])))
+    }
+
+    /// Returns the record bytes the checksum covers, without the zeros padding the last notification.
+    ///
+    /// - Returns: `nil` if no length matches the checksum.
+    static func records(_ bytes: [UInt8], checksum: UInt16) -> [UInt8]? {
+        // a notification holds 10 records, so at most 9 are padding
+        let end = bytes.count - bytes.count % 2
+        for length in stride(from: end, through: max(0, end - 18), by: -2) {
+            let records = bytes.prefix(length)
+            if UInt16(crc16Modbus: records) == checksum {
+                return Array(records)
+            }
+        }
+        return nil
     }
 }
 

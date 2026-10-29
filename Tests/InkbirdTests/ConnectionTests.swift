@@ -53,6 +53,19 @@ final class ConnectionTests: XCTestCase {
         await connection.disconnect()
     }
 
+    func testPaddedHistory() async throws {
+        // 6003 records, as the sensor sent on 2026-10-29: 601 notifications, the last padded with zeros
+        let temperature = try CapturedPacketTests.fixture("history-temperature") + hex("97 0A A2 0A A4 0A")
+        let humidity = try CapturedPacketTests.fixture("history-humidity") + hex("31 17 39 17 2D 17")
+        let central = TestCentral(device: Self.sensor(temperature: temperature, humidity: humidity))
+        let connection = try await central.connect(to: central.peripheral, model: .ibsTH2)
+        let history = try await connection.history()
+        XCTAssertEqual(history.count, 6003)
+        XCTAssertEqual(history.suffix(4).map { $0.temperature }, [26.96, 27.11, 27.22, 27.24])
+        XCTAssertEqual(history[6002].humidity, 59.33, accuracy: 0.001)
+        await connection.disconnect()
+    }
+
     func testPartialHistory() async throws {
         // a sensor with 500 records: the download ends when the records stop, and the CRC still matches
         let temperature = Array(try CapturedPacketTests.fixture("history-temperature").suffix(1000))
@@ -147,8 +160,12 @@ final class ConnectionTests: XCTestCase {
     /// Simulated sensor: answers history requests on `FFF6` like the captured IBS-TH2.
     static func sensor(temperature: [UInt8], humidity: [UInt8]) -> @Sendable ([UInt8]) -> [[UInt8]] {
         let header = hex("30 75 00 00 1E FE 00 00 00 00 00 00 00 00 00 00 00 00 00 00")
+        // the last notification is padded with zeros
         func frames(_ records: [UInt8]) -> [[UInt8]] {
-            stride(from: 0, to: records.count, by: 20).map { Array(records[$0 ..< min($0 + 20, records.count)]) }
+            stride(from: 0, to: records.count, by: 20).map {
+                let frame = Array(records[$0 ..< min($0 + 20, records.count)])
+                return frame + [UInt8](repeating: 0, count: 20 - frame.count)
+            }
         }
         func checksum(_ records: [UInt8]) -> [UInt8] {
             let crc = UInt16(crc16Modbus: records)
