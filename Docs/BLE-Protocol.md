@@ -71,7 +71,7 @@ The model and firmware version can't be read from this service.
 
 | UUID | Properties | Description | Value seen | Meaning | Status |
 |---|---|---|---|---|---|
-| `FFF1` | read, write | `cfg data` | `00 00 00 00 00 00 00 78 00 00 00 32 2D 33 AF 8C 00 00 00 00` | Settings. Bytes 14–15 are a CRC-16/MODBUS of bytes 0–13. Byte 7 `0x78` = 120 matches the 2-minute logging interval measured from `FFF5` | CRC Verified; fields Observed |
+| `FFF1` | read, write | `cfg data` | `00 00 00 00 00 00 00 78 00 00 00 32 2D 33 AF 8C 00 00 00 00` | Settings. Bytes 14–15 are a CRC-16/MODBUS of bytes 0–13. Byte 7 `0x78` = 120 matches the 2-minute sampling interval measured from `FFF5`. History records are stored less often | CRC Verified; fields Observed |
 | `FFF2` | read | `Real time data` | `89 0A 16 16 00 15 A3` | Live reading, see [section 3](#3-live-reading) | Verified |
 | `FFF3` | read, write | `cfg data2` | 20 × `00` | Unknown | Observed |
 | `FFF4` | read | `measure` | `49 22 08 15 04 CB A6 B6 …` | Bluetooth address, then a CRC-16/MODBUS of those 6 bytes | Verified |
@@ -100,21 +100,25 @@ The sensor keeps temperature and humidity in separate buffers. Each step is a wr
 | Step | Write to `FFF8` | Reply on `FFF6` |
 |---|---|---|
 | 1 | `02` | Temperature header, 1 notification |
-| 2 | `01` | Temperature records, 600 notifications |
+| 2 | `01` | Temperature records, about 600 notifications |
 | 3 | `07` | Temperature trailer, 1 notification |
 | 4 | `04` | Humidity header, 1 notification |
-| 5 | `03` | Humidity records, 600 notifications |
+| 5 | `03` | Humidity records, about 600 notifications |
 | 6 | `08` | Humidity trailer, 1 notification |
 
 Each reply arrives about 30 ms after its write response. The app waited for the last record before sending the next write. In this capture, it also read `FFF1`, `FFF2` and `FFF4` while the temperature records were streaming. The sensor did not object.
 
 ### Header
 
-`30 75 00 00 1E FE` followed by zeros (20 bytes). Bytes 0–3 are uint32 LE `30000`, and bytes 4–5 are a CRC-16/MODBUS of bytes 0–3. The CRC is **Verified**. The value's meaning is **Observed**: it was the same for both buffers, and it isn't the record count (6000) or the byte count (12000).
+`30 75 00 00 1E FE` followed by zeros (20 bytes). Bytes 0–3 are uint32 LE `30000`, and bytes 4–5 are a CRC-16/MODBUS of bytes 0–3. The CRC is **Verified**.
+
+The value was the same for both buffers. In the two downloads so far, it was 24000 more than the number of records sent: `30000` with 6000 records, and `30003` (`33 75 00 00 1E BA`) with 6003. A header requested a few minutes later read `30004`. **Observed.** The library doesn't rely on this.
 
 ### Records
 
-Every notification is 20 bytes: 10 records of 2 bytes each. Each stream was 600 notifications, so **6000 records**, about 8.3 days at a 2-minute interval. **Verified.**
+Every notification is 20 bytes: 10 records of 2 bytes each. In the capture, each stream was 600 notifications, so 6000 records. A download from the same sensor on 2026-10-29 at 04:55 UTC sent **601** notifications per buffer. The last held 3 records followed by 14 zero bytes, and the trailer CRC covers exactly 12006 bytes (6003 records). **Verified.**
+
+The buffer is not a fixed 6000 records. Compared with the capture, the 04:55 download had dropped the 14 oldest records and added 17 new ones.
 
 | Buffer | Record | Example |
 |---|---|---|
@@ -125,30 +129,33 @@ The records carry no timestamps or indices. They arrive **oldest first**. The tw
 
 Every one of the 6000 values in both buffers was plausible (15.35–39.02 °C, 32.80–86.02 %). None was `FFFF` or another fill value, so the buffer was full. A sensor with less stored history probably sends fewer records or fill values. **Not captured.**
 
-The records stream has no end marker. The app sent the trailer request 65 ms after the 600th notification, though gaps between records reached 211 ms. So it stopped at a known count instead of waiting for the stream to go quiet. **Verified.**
+The records stream has no end marker. The app sent the trailer request 65 ms after the 600th notification, though gaps between records reached 211 ms. So it knew the count in advance, possibly from the header. **Verified.**
 
-This library does the same. It stops at 600 notifications, or after the stream has been quiet for the reply timeout, then checks the trailer CRC. The CRC catches a stream that was cut short or lost notifications.
+This library collects records until none has arrived for 2 s. It then requests the trailer and keeps the longest prefix whose CRC matches it, which drops the zero padding (at most 9 records). If no prefix matches, records were lost and the download fails.
 
-The Inkbird app showed Min 23.97 °C and Max 35.82 °C for the day. Those are the min and max of the newest 94–190 records, consistent with records 2 minutes apart. Its average (27.80 °C) and chart don't match any window of the stream exactly. The app seems to chart its own stored copy of earlier syncs.
+The Inkbird app showed Min 23.97 °C and Max 35.82 °C for the day. Those are the min and max of the newest 94–190 records. Its chart covered 16:50–22:28, about 338 minutes, and matched the newest ~44 records, which suggests records about 8 minutes apart (see [Timestamps](#timestamps)).
 
 ### Trailer
 
-`AF 9B` (temperature) and `FF 9F` (humidity), each followed by zeros. Each is a CRC-16/MODBUS over all 12000 bytes of that buffer's records, stored LE (`0x9BAF`, `0x9FFF`). It confirms the transfer was complete and in order. **Verified.**
+`AF 9B` (temperature) and `FF 9F` (humidity), each followed by zeros. Each is a CRC-16/MODBUS over all of that buffer's record bytes, without the padding, stored LE (`0x9BAF`, `0x9FFF`). It confirms the transfer was complete and in order. **Verified.**
 
 ### Timestamps
 
-Records are taken at a fixed interval, which is `FFF1` byte 7 in seconds (`0x78` = 120 s). Two observations support this. **Observed.**
+**The interval between history records is not known yet.**
 
-- `FFF1` byte 7 reads `0x78`.
-- Polling `FFF5` every 10 s for 12 minutes, it went up by one 6 times, on average every 119.8 s.
+- The sensor samples every 120 s. `FFF1` byte 7 reads `0x78` (120), and `FFF5` went up 6 times in 12 minutes, on average every 119.8 s. **Observed.**
+- History records are stored less often. Between the capture (02:27:34 UTC) and the next download (04:54:47 UTC), 17 records were added in 147 minutes. That means one record every 8.2–9.2 minutes, not 120 s. **Verified.**
+- The app's chart (16:50–22:28 for the newest ~44 records) also suggests about 8 minutes.
 
-Date the newest record as the time of the sync, and each older one an interval earlier. Each date can be up to one interval late.
+The sensor may store every 4th sample (8 minutes), with some samples lost while connected, but this needs a measurement over several hours with the sensor left alone. Requests to `FFF8` hold back the sampling timer (see below), so polling the header can't measure it.
 
-The library reads the interval as a uint16 LE from `FFF1` bytes 7–8, like the other multi-byte fields. Byte 8 has only been seen as `00`, so it could also be a separate field. Changing the interval in the Inkbird app would settle this.
+The library currently dates the newest record as the time of the download and each older one `FFF1`'s interval earlier. **This spaces the records too closely.** It reads the interval as a uint16 LE from `FFF1` bytes 7–8. Byte 8 has only been seen as `00`, so it could also be a separate field.
 
 ### Record counter (`FFF5`)
 
-`FFF5` is a uint32 LE that goes up by one with each record. It read 288 → 289 at 22:25:17 (±8 s), and went from 291 to 297 between 22:32 and 22:44. It does not equal the number of records the sync sends (6000). It may count records since logging started or since the buffer last wrapped. **Observed.**
+`FFF5` is a uint32 LE that goes up by one with each sample, every 120 s. It read 288 → 289 at 22:25:17 (±8 s), went from 291 to 297 between 22:32 and 22:44, and read 363 at 04:54 UTC. It does not count history records. **Observed.**
+
+Writing to `FFF8` holds back the sampling timer. Requesting the header every 15 s kept `FFF5` at 364 for over 5 minutes, while reads alone (the 12-minute poll) didn't. **Observed.**
 
 ### After the sync
 
@@ -174,9 +181,10 @@ PureSwift `GATT` buffers 100 notifications per subscription. At the sensor's pac
 
 ## 6. Open questions
 
-- Fetching only new records: the app downloaded the whole buffer (6000 records). It might work out which records are new from `FFF5` or from its own records. A second sync capture would show whether the stream is always the full buffer.
-- What does a sensor with fewer than 6000 stored records send: fewer records, or fill values?
-- What do the header's `30000` and `FFF5` mean exactly?
+- **The history record interval** (see [Timestamps](#timestamps)).
+- Fetching only new records: every download so far sent the whole buffer. A client can find the new records by matching the end of its previous download.
+- What does a sensor with much less stored history send?
+- What exactly does the header mean? Its offset of 24000 from the record count is unexplained.
 - What does `FFF9` `06` do?
 - What are `FFF1` bytes 11–13 (`32 2D 33`)? Is changing byte 7 how the app sets the interval?
 - What is advertisement byte 8 (`08`)?
