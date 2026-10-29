@@ -110,7 +110,7 @@ public final class Store: ObservableObject {
         return false
     }
     
-    public func log(_ message: String) {
+    nonisolated public func log(_ message: String) {
         print(message)
     }
 }

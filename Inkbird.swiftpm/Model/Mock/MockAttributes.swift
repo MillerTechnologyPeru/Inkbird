@@ -16,6 +16,28 @@ typealias MockService = GATT.Service<GATT.Peripheral, UInt16>
 typealias MockCharacteristic = GATT.Characteristic<GATT.Peripheral, UInt16>
 typealias MockDescriptor = GATT.Descriptor<GATT.Peripheral, UInt16>
 
+// Bluetooth SIG assigned numbers, no longer predefined in Bluetooth 8
+extension BluetoothUUID {
+
+    static var deviceInformation: BluetoothUUID { .bit16(0x180A) }
+
+    static var batteryService: BluetoothUUID { .bit16(0x180F) }
+
+    static var savantSystems2: BluetoothUUID { .bit16(0xFEA8) }
+
+    static var deviceName: BluetoothUUID { .bit16(0x2A00) }
+
+    static var batteryLevel: BluetoothUUID { .bit16(0x2A19) }
+
+    static var modelNumberString: BluetoothUUID { .bit16(0x2A24) }
+
+    static var serialNumberString: BluetoothUUID { .bit16(0x2A25) }
+
+    static var manufacturerNameString: BluetoothUUID { .bit16(0x2A29) }
+
+    static var clientCharacteristicConfiguration: BluetoothUUID { .bit16(0x2902) }
+}
+
 extension MockService {
     
     static var deviceInformation: MockService {
