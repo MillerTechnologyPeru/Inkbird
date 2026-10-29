@@ -125,6 +125,10 @@ The records carry no timestamps or indices. They arrive **oldest first**. The tw
 
 Every one of the 6000 values in both buffers was plausible (15.35–39.02 °C, 32.80–86.02 %). None was `FFFF` or another fill value, so the buffer was full. A sensor with less stored history probably sends fewer records or fill values. **Not captured.**
 
+The records stream has no end marker. The app sent the trailer request 65 ms after the 600th notification, though gaps between records reached 211 ms. So it stopped at a known count instead of waiting for the stream to go quiet. **Verified.**
+
+This library does the same. It stops at 600 notifications, or after the stream has been quiet for the reply timeout, then checks the trailer CRC. The CRC catches a stream that was cut short or lost notifications.
+
 The Inkbird app showed Min 23.97 °C and Max 35.82 °C for the day. Those are the min and max of the newest 94–190 records, consistent with records 2 minutes apart. Its average (27.80 °C) and chart don't match any window of the stream exactly. The app seems to chart its own stored copy of earlier syncs.
 
 ### Trailer
@@ -140,6 +144,8 @@ Records are taken at a fixed interval, which is `FFF1` byte 7 in seconds (`0x78`
 
 Date the newest record as the time of the sync, and each older one an interval earlier. Each date can be up to one interval late.
 
+The library reads the interval as a uint16 LE from `FFF1` bytes 7–8, like the other multi-byte fields. Byte 8 has only been seen as `00`, so it could also be a separate field. Changing the interval in the Inkbird app would settle this.
+
 ### Record counter (`FFF5`)
 
 `FFF5` is a uint32 LE that goes up by one with each record. It read 288 → 289 at 22:25:17 (±8 s), and went from 291 to 297 between 22:32 and 22:44. It does not equal the number of records the sync sends (6000). It may count records since logging started or since the buffer last wrapped. **Observed.**
@@ -153,6 +159,8 @@ The history can be read without this write, so a client should not send it until
 ### Duration
 
 Each 600-notification stream took about 41 s (about 68 ms per notification). A full sync of both buffers took about 85 s. **Verified.**
+
+PureSwift `GATT` buffers 100 notifications per subscription. At the sensor's pace that is plenty, but a client that stops reading for several seconds mid-stream will lose records. The trailer CRC detects this.
 
 ## 5. Capturing data
 
