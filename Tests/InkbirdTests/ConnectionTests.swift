@@ -45,8 +45,10 @@ final class ConnectionTests: XCTestCase {
         XCTAssertEqual(history.count, 6000)
         XCTAssertEqual(history.suffix(3).map { $0.temperature }, [24.47, 26.54, 26.96])
         XCTAssertEqual(history[5999].humidity, 56.29, accuracy: 0.001)
-        XCTAssertEqual(history[5999].date.timeIntervalSince(history[5998].date), 120, accuracy: 0.001)
-        XCTAssertEqual(history[5999].date.timeIntervalSince(start), 0, accuracy: 1)
+        // pairs 2 minutes apart, every 20 minutes, the newest in the last slot before the download
+        XCTAssertEqual(Set(zip(history, history.dropFirst()).map { $1.date.timeIntervalSince($0.date) }), [120, 1080])
+        XCTAssertLessThanOrEqual(history[5999].date, start)
+        XCTAssertGreaterThan(history[5999].date, start.addingTimeInterval(-1080))
         // the same requests as the Inkbird app, and nothing written to the reset characteristic
         XCTAssertEqual(central.writes, [[0x02], [0x01], [0x07], [0x04], [0x03], [0x08]])
         XCTAssertEqual(Set(central.writtenCharacteristics), [.inkbirdHistoryRequest])
