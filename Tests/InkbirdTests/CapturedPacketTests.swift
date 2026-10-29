@@ -70,16 +70,17 @@ final class CapturedPacketTests: XCTestCase {
         XCTAssertEqual(temperature.count, 12000)
         XCTAssertEqual(Array(temperature.prefix(20)), hex("89 08 56 08 3D 08 6F 08 7C 08 30 08 63 08 35 08 1A 08 4B 08"))
         let end = Date(timeIntervalSince1970: 1_793_240_854) // 2026-10-29 02:27:34 UTC
-        let history = InkbirdHistoryReading.decode(temperature: temperature, humidity: humidity, end: end, interval: 120)
+        let history = InkbirdHistoryReading.decode(temperature: temperature, humidity: humidity, end: end, calendar: Self.utc)
         XCTAssertEqual(history.count, 6000)
         // oldest first
         XCTAssertEqual(history[0].temperature, 21.85, accuracy: 0.001)
         XCTAssertEqual(history[0].humidity, 65.28, accuracy: 0.001)
-        XCTAssertEqual(history[0].date, end.addingTimeInterval(-5999 * 120))
+        XCTAssertEqual(history[0].date, Date(timeIntervalSince1970: 1_789_641_600)) // 2026-09-17 10:40 UTC
         // newest last: warmed by hand just before the sync
         XCTAssertEqual(history.suffix(3).map { $0.temperature }, [24.47, 26.54, 26.96])
         XCTAssertEqual(history[5999].humidity, 56.29, accuracy: 0.001)
-        XCTAssertEqual(history[5999].date, end)
+        // 02:02, 02:20, 02:22
+        XCTAssertEqual(history.suffix(3).map { $0.date.timeIntervalSince1970 }, [1_793_239_320, 1_793_240_400, 1_793_240_520])
         XCTAssertEqual(history.map { $0.temperature }.min(), 15.35)
         XCTAssertEqual(history.map { $0.temperature }.max(), 39.02)
     }
@@ -89,12 +90,80 @@ final class CapturedPacketTests: XCTestCase {
         let history = InkbirdHistoryReading.decode(
             temperature: hex("10 0A 20 0A 30 0A"),
             humidity: hex("88 13 70 17"),
-            end: Date(timeIntervalSince1970: 1000),
-            interval: 60
+            end: Date(timeIntervalSince1970: 1000), // 00:16:40 UTC
+            calendar: Self.utc
         )
         XCTAssertEqual(history.map { $0.temperature }, [25.92, 26.08])
         XCTAssertEqual(history.map { $0.humidity }, [50, 60])
-        XCTAssertEqual(history.map { $0.date.timeIntervalSince1970 }, [940, 1000])
+        XCTAssertEqual(history.map { $0.date.timeIntervalSince1970 }, [0, 120])
+    }
+
+    func testDates() {
+        func dates(_ count: Int, _ end: TimeInterval) -> [TimeInterval] {
+            InkbirdHistoryReading.dates(count: count, end: Date(timeIntervalSince1970: end), calendar: Self.utc)
+                .map { $0.timeIntervalSince1970 }
+        }
+        // before the second slot of a pair, the newest record is the first slot
+        XCTAssertEqual(dates(3, 1200 + 119), [0, 120, 1200])
+        // on the second slot
+        XCTAssertEqual(dates(3, 1200 + 120), [120, 1200, 1320])
+        XCTAssertEqual(dates(0, 1000), [])
+    }
+
+    /// Inkbird app (iOS) export of the same sensor, after syncing at 2026-10-29 01:23:11 EDT (05:23:11 UTC).
+    /// The app writes a row every 2 minutes, interpolating between records; every record must be at a row with its values.
+    func testInkbirdAppExport() throws {
+        let temperature = try Self.fixture("history-2026-10-29-temperature")
+        let humidity = try Self.fixture("history-2026-10-29-humidity")
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "America/New_York"))
+        let history = InkbirdHistoryReading.decode(
+            temperature: temperature,
+            humidity: humidity,
+            end: Date(timeIntervalSince1970: 1_793_251_391),
+            calendar: calendar
+        )
+        XCTAssertEqual(history.count, 6001)
+        // the export starts at 2026-10-27 00:00 EDT
+        let rows = try Self.inkbirdExport("IBS-THS-2026-10-29", timeZone: calendar.timeZone)
+        XCTAssertEqual(rows.count, 1482)
+        let start = try XCTUnwrap(rows.keys.min())
+        let exported = history.filter { $0.date >= start }
+        XCTAssertEqual(exported.count, 298)
+        for reading in exported {
+            let row = try XCTUnwrap(rows[reading.date], "\(reading.date)")
+            XCTAssertEqual(row.temperature, reading.temperature, accuracy: 0.001, "\(reading.date)")
+            XCTAssertEqual(row.humidity, reading.humidity, accuracy: 0.001, "\(reading.date)")
+        }
+        XCTAssertEqual(history.last?.date, rows.keys.max()) // 01:22
+    }
+
+    static var utc: Calendar {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        return calendar
+    }
+
+    /// Reads an Inkbird app CSV export: UTF-16, tab separated, three header lines.
+    static func inkbirdExport(_ name: String, timeZone: TimeZone) throws -> [Date: (temperature: Float, humidity: Float)] {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: name, withExtension: "csv", subdirectory: "Resources"))
+        let text = try XCTUnwrap(String(data: Data(contentsOf: url), encoding: .utf16))
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = timeZone
+        formatter.dateFormat = "MM/dd/yyyy HH:mm:ss"
+        var rows = [Date: (temperature: Float, humidity: Float)]()
+        for line in text.split(whereSeparator: \.isNewline).dropFirst(3) {
+            let fields = line.split(separator: "\t").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard fields.count >= 4,
+                  let date = formatter.date(from: fields[0]),
+                  let temperature = Float(fields[1]),
+                  let humidity = Float(fields[3]) else {
+                continue
+            }
+            rows[date] = (temperature, humidity)
+        }
+        return rows
     }
 
     static func fixture(_ name: String) throws -> [UInt8] {

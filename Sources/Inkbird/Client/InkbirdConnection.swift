@@ -109,26 +109,21 @@ public actor InkbirdConnection<Central: CentralManager> where Central: Sendable,
         }
     }
 
-    /// Downloads the stored history: about 6000 readings per buffer.
+    /// Downloads the stored history: about 6000 readings, roughly 40 days at one reading per 10 minutes.
     ///
-    /// A full download takes about 90 seconds.
-    ///
-    /// - Warning: Dates assume records are ``InkbirdSettings/interval`` apart, but a real sensor
-    /// stored them about 8–9 minutes apart while sampling every 120 s. See `Docs/BLE-Protocol.md`.
+    /// A full download takes about 90 seconds. Readings are dated the way the Inkbird app dates them;
+    /// see ``InkbirdHistoryReading/dates(count:end:calendar:)``.
     ///
     /// - Parameter timeout: Time allowed for each reply, and between records.
     public func history(timeout: TimeInterval = 5) async throws -> [InkbirdHistoryReading] {
         try await enqueue {
-            let settings = try await self.performReadSettings(timeout: timeout)
-            // the newest record is at most one interval old when the download starts
             let end = Date()
             let temperature = try await self.performDownload(.temperature, timeout: timeout)
             let humidity = try await self.performDownload(.humidity, timeout: timeout)
             return InkbirdHistoryReading.decode(
                 temperature: temperature,
                 humidity: humidity,
-                end: end,
-                interval: TimeInterval(settings.interval)
+                end: end
             )
         }
     }
