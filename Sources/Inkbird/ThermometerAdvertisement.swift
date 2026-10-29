@@ -149,7 +149,7 @@ public extension InkbirdAdvertisement.Thermometer.ManufacturingData.Humidity {
 public extension InkbirdAdvertisement.Thermometer.ManufacturingData {
 
     /// Sensor that took the reading.
-    struct Probe: RawRepresentable, Equatable, Hashable, Codable {
+    struct Probe: RawRepresentable, Equatable, Hashable, Codable, Sendable {
 
         public let rawValue: UInt8
 
