@@ -99,27 +99,36 @@ public actor InkbirdConnection<Central: CentralManager> where Central: Sendable,
 
     /// Downloads the record bytes of one history buffer, oldest first, and checks them against the sensor's CRC.
     ///
-    /// - Parameter timeout: Time allowed for each reply, and between records.
+    /// - Parameter timeout: Time allowed for each reply.
+    /// - Parameter quietPeriod: Time without a record after which the records are complete.
+    ///   The sensor sends no end marker, so a shorter gap in a weak connection must not end the download.
+    ///   The default is the longest connection supervision timeout Apple allows: a longer gap ends the connection anyway.
     public func download(
         _ buffer: InkbirdHistoryBuffer,
-        timeout: TimeInterval = 5
+        timeout: TimeInterval = 5,
+        quietPeriod: TimeInterval = 6
     ) async throws -> [UInt8] {
         try await enqueue {
-            try await self.performDownload(buffer, timeout: timeout)
+            try await self.performDownload(buffer, timeout: timeout, quietPeriod: quietPeriod)
         }
     }
 
     /// Downloads the stored history: about 6000 readings, roughly 40 days at one reading per 10 minutes.
     ///
-    /// A full download takes about 90 seconds. Readings are dated the way the Inkbird app dates them;
+    /// A full download takes about 90 seconds, plus the quiet period after each buffer. Readings are dated the way the Inkbird app dates them;
     /// see ``InkbirdHistoryReading/dates(count:end:calendar:)``.
     ///
-    /// - Parameter timeout: Time allowed for each reply, and between records.
-    public func history(timeout: TimeInterval = 5) async throws -> [InkbirdHistoryReading] {
+    /// - Parameter timeout: Time allowed for each reply.
+    /// - Parameter quietPeriod: Time without a record after which the records of each buffer are complete.
+    ///   The sensor sends no end marker, so a shorter gap in a weak connection must not end the download.
+    public func history(
+        timeout: TimeInterval = 5,
+        quietPeriod: TimeInterval = 6
+    ) async throws -> [InkbirdHistoryReading] {
         try await enqueue {
             let end = Date()
-            let temperature = try await self.performDownload(.temperature, timeout: timeout)
-            let humidity = try await self.performDownload(.humidity, timeout: timeout)
+            let temperature = try await self.performDownload(.temperature, timeout: timeout, quietPeriod: quietPeriod)
+            let humidity = try await self.performDownload(.humidity, timeout: timeout, quietPeriod: quietPeriod)
             return InkbirdHistoryReading.decode(
                 temperature: temperature,
                 humidity: humidity,
@@ -224,14 +233,14 @@ private extension InkbirdConnection {
         return settings
     }
 
-    func performDownload(_ buffer: InkbirdHistoryBuffer, timeout: TimeInterval) async throws -> [UInt8] {
+    func performDownload(_ buffer: InkbirdHistoryBuffer, timeout: TimeInterval, quietPeriod: TimeInterval) async throws -> [UInt8] {
         // the Inkbird app requests the header first
         let header = try await collect(1, for: buffer.header, timeout: timeout)
         guard InkbirdHistoryReply.header(header[0]) != nil else {
             throw InkbirdConnectionError.invalidData(.inkbirdHistoryData)
         }
-        // records arrive 10 to a notification, with no end marker
-        let frames = try await collect(nil, for: buffer.records, timeout: timeout)
+        // records arrive 10 to a notification, about 30 ms apart, with no end marker
+        let frames = try await collect(nil, for: buffer.records, timeout: timeout, quiet: quietPeriod)
         let reply = try await collect(1, for: buffer.checksum, timeout: timeout)
         guard let checksum = InkbirdHistoryReply.checksum(reply[0]) else {
             throw InkbirdConnectionError.invalidData(.inkbirdHistoryData)
@@ -243,17 +252,16 @@ private extension InkbirdConnection {
         return records
     }
 
-    /// Time without a notification after which a stream of records is complete.
-    /// Records arrive about 30 ms apart; the longest gap seen was 0.21 s.
-    static var quietPeriod: TimeInterval { 2 }
-
     /// Writes a history request and collects the notifications it causes.
     ///
     /// - Parameter count: Notifications to wait for, or `nil` to collect until the device goes quiet.
+    /// - Parameter timeout: Time allowed for the first notification.
+    /// - Parameter quiet: Time allowed after each notification. Defaults to `timeout`.
     func collect(
         _ count: Int?,
         for request: InkbirdHistoryRequest,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        quiet: TimeInterval? = nil
     ) async throws -> [[UInt8]] {
         let characteristic = try characteristic(.inkbirdHistoryRequest)
         requestCount += 1
@@ -264,7 +272,7 @@ private extension InkbirdConnection {
             collector = Collector(
                 id: id,
                 count: count,
-                quiet: count == nil ? min(timeout, Self.quietPeriod) : timeout,
+                quiet: quiet ?? timeout,
                 deadline: Date().addingTimeInterval(timeout),
                 continuation: continuation
             )

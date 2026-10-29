@@ -41,7 +41,7 @@ final class ConnectionTests: XCTestCase {
         let central = TestCentral(device: Self.sensor(temperature: temperature, humidity: humidity))
         let connection = try await central.connect(to: central.peripheral, model: .ibsTH2)
         let start = Date()
-        let history = try await connection.history()
+        let history = try await connection.history(quietPeriod: 0.2)
         XCTAssertEqual(history.count, 6000)
         XCTAssertEqual(history.suffix(3).map { $0.temperature }, [24.47, 26.54, 26.96])
         XCTAssertEqual(history[5999].humidity, 56.29, accuracy: 0.001)
@@ -61,7 +61,7 @@ final class ConnectionTests: XCTestCase {
         let humidity = try CapturedPacketTests.fixture("history-humidity") + hex("31 17 39 17 2D 17")
         let central = TestCentral(device: Self.sensor(temperature: temperature, humidity: humidity))
         let connection = try await central.connect(to: central.peripheral, model: .ibsTH2)
-        let history = try await connection.history()
+        let history = try await connection.history(quietPeriod: 0.2)
         XCTAssertEqual(history.count, 6003)
         XCTAssertEqual(history.suffix(4).map { $0.temperature }, [26.96, 27.11, 27.22, 27.24])
         XCTAssertEqual(history[6002].humidity, 59.33, accuracy: 0.001)
@@ -74,7 +74,7 @@ final class ConnectionTests: XCTestCase {
         let humidity = Array(try CapturedPacketTests.fixture("history-humidity").suffix(1000))
         let central = TestCentral(device: Self.sensor(temperature: temperature, humidity: humidity))
         let connection = try await central.connect(to: central.peripheral, model: .ibsTH2)
-        let history = try await connection.history(timeout: 0.2)
+        let history = try await connection.history(timeout: 0.2, quietPeriod: 0.2)
         XCTAssertEqual(history.count, 500)
         XCTAssertEqual(history.last?.temperature, 26.96)
         await connection.disconnect()
@@ -95,7 +95,33 @@ final class ConnectionTests: XCTestCase {
         let central = TestCentral(device: sensor)
         let connection = try await central.connect(to: central.peripheral, model: .ibsTH2)
         do {
-            _ = try await connection.download(.temperature)
+            _ = try await connection.download(.temperature, quietPeriod: 0.2)
+            XCTFail()
+        } catch InkbirdConnectionError.checksumMismatch { }
+        await connection.disconnect()
+    }
+
+    func testGapInRecords() async throws {
+        // a weak connection pauses the records partway through
+        let temperature = try CapturedPacketTests.fixture("history-temperature")
+        let humidity = try CapturedPacketTests.fixture("history-humidity")
+        let gap = TestCentral.Gap(request: .temperatureRecords, afterFrame: 300, duration: 0.5)
+        let central = TestCentral(gap: gap, device: Self.sensor(temperature: temperature, humidity: humidity))
+        let connection = try await central.connect(to: central.peripheral, model: .ibsTH2)
+        let history = try await connection.history(quietPeriod: 1)
+        XCTAssertEqual(history.count, 6000)
+        XCTAssertEqual(history.suffix(3).map { $0.temperature }, [24.47, 26.54, 26.96])
+        await connection.disconnect()
+    }
+
+    func testGapLongerThanQuietPeriod() async throws {
+        // the records stop at the gap, so the checksum does not match
+        let temperature = try CapturedPacketTests.fixture("history-temperature")
+        let gap = TestCentral.Gap(request: .temperatureRecords, afterFrame: 300, duration: 0.5)
+        let central = TestCentral(gap: gap, device: Self.sensor(temperature: temperature, humidity: temperature))
+        let connection = try await central.connect(to: central.peripheral, model: .ibsTH2)
+        do {
+            _ = try await connection.download(.temperature, quietPeriod: 0.1)
             XCTFail()
         } catch InkbirdConnectionError.checksumMismatch { }
         await connection.disconnect()
@@ -220,6 +246,15 @@ private final class TestCentral: CentralManager, @unchecked Sendable {
     /// Whether `connect(to:)` succeeds; otherwise it never returns, like CoreBluetooth.
     let isAdvertising: Bool
 
+    /// Pause in the notifications replying to a request.
+    struct Gap {
+        let request: InkbirdHistoryRequest
+        let afterFrame: Int
+        let duration: TimeInterval
+    }
+
+    let gap: Gap?
+
     private let lock = NSLock()
 
     private var _writes = [(BluetoothUUID, [UInt8])]()
@@ -231,9 +266,11 @@ private final class TestCentral: CentralManager, @unchecked Sendable {
     init(
         isAdvertising: Bool = true,
         services: [BluetoothUUID] = [.bit16(0x180A), .inkbirdThermostat],
+        gap: Gap? = nil,
         device: @escaping @Sendable ([UInt8]) -> [[UInt8]]
     ) {
         self.isAdvertising = isAdvertising
+        self.gap = gap
         self.services = services
         self.device = device
     }
@@ -333,8 +370,22 @@ private final class TestCentral: CentralManager, @unchecked Sendable {
         guard characteristic.uuid == .inkbirdHistoryRequest else {
             return
         }
-        for reply in device(frame) {
+        let replies = device(frame)
+        guard let gap, frame == [gap.request.rawValue], gap.afterFrame < replies.count else {
+            for reply in replies {
+                notify[.inkbirdHistoryData]?.yield(Data(reply))
+            }
+            return
+        }
+        for reply in replies.prefix(gap.afterFrame) {
             notify[.inkbirdHistoryData]?.yield(Data(reply))
+        }
+        let rest = Array(replies.dropFirst(gap.afterFrame))
+        Task {
+            try? await Task.sleep(nanoseconds: UInt64(gap.duration * 1_000_000_000))
+            for reply in rest {
+                notify[.inkbirdHistoryData]?.yield(Data(reply))
+            }
         }
     }
 
