@@ -53,6 +53,17 @@ final class CapturedPacketTests: XCTestCase {
         XCTAssertEqual(InkbirdHistoryReply.checksum(hex("FF 9F 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00")), UInt16(crc16Modbus: humidity))
     }
 
+    func testPadding() throws {
+        // the last notification of a 6003-record stream: 3 records, then zeros the checksum leaves out
+        let records = try Self.fixture("history-temperature") + hex("97 0A A2 0A A4 0A")
+        let padded = records + [UInt8](repeating: 0, count: 14)
+        let checksum = UInt16(crc16Modbus: records)
+        XCTAssertEqual(InkbirdHistoryReply.records(padded, checksum: checksum), records)
+        XCTAssertEqual(InkbirdHistoryReply.records(records, checksum: checksum), records)
+        XCTAssertNil(InkbirdHistoryReply.records(padded, checksum: checksum &+ 1))
+        XCTAssertEqual(InkbirdHistoryReply.records([], checksum: 0xFFFF), [])
+    }
+
     func testHistory() throws {
         let temperature = try Self.fixture("history-temperature")
         let humidity = try Self.fixture("history-humidity")
