@@ -27,6 +27,10 @@ public final class Store: ObservableObject {
     @Published
     public private(set) var peripherals = [NativeCentral.Peripheral: InkbirdAdvertisement]()
     
+    /// Open GATT connections.
+    @Published
+    public internal(set) var connections = [NativeCentral.Peripheral: InkbirdConnection<NativeCentral>]()
+    
     lazy var central = NativeCentral()
     
     private var scanStream: AsyncCentralScan<NativeCentral>?
