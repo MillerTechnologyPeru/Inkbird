@@ -71,7 +71,7 @@ The model and firmware version can't be read from this service.
 
 | UUID | Properties | Description | Value seen | Meaning | Status |
 |---|---|---|---|---|---|
-| `FFF1` | read, write | `cfg data` | `00 00 00 00 00 00 00 78 00 00 00 32 2D 33 AF 8C 00 00 00 00` | Settings. Bytes 14–15 are a CRC-16/MODBUS of bytes 0–13. Byte 7 `0x78` = 120 matches the 2-minute sampling interval measured from `FFF5`. History records are stored less often | CRC Verified; fields Observed |
+| `FFF1` | read, write | `cfg data` | `00 00 00 00 00 00 00 78 00 00 00 32 2D 33 AF 8C 00 00 00 00` | Settings. Bytes 14–15 are a CRC-16/MODBUS of bytes 0–13. Byte 7 `0x78` = 120 matches the 2-minute sampling interval measured from `FFF5`. History records are stored about every 10 minutes | CRC Verified; fields Observed |
 | `FFF2` | read | `Real time data` | `89 0A 16 16 00 15 A3` | Live reading, see [section 3](#3-live-reading) | Verified |
 | `FFF3` | read, write | `cfg data2` | 20 × `00` | Unknown | Observed |
 | `FFF4` | read | `measure` | `49 22 08 15 04 CB A6 B6 …` | Bluetooth address, then a CRC-16/MODBUS of those 6 bytes | Verified |
@@ -112,13 +112,13 @@ Each reply arrives about 30 ms after its write response. The app waited for the 
 
 `30 75 00 00 1E FE` followed by zeros (20 bytes). Bytes 0–3 are uint32 LE `30000`, and bytes 4–5 are a CRC-16/MODBUS of bytes 0–3. The CRC is **Verified**.
 
-The value was the same for both buffers. In the two downloads so far, it was 24000 more than the number of records sent: `30000` with 6000 records, and `30003` (`33 75 00 00 1E BA`) with 6003. A header requested a few minutes later read `30004`. **Observed.** The library doesn't rely on this.
+The value was the same for both buffers. In all three downloads, it was 24000 more than the number of records sent: `30000` with 6000 records, `30003` (`33 75 00 00 1E BA`) with 6003, and `30001` (`31 75 00 00 1F 02`) with 6001. **Observed.** The library doesn't rely on this.
 
 ### Records
 
 Every notification is 20 bytes: 10 records of 2 bytes each. In the capture, each stream was 600 notifications, so 6000 records. A download from the same sensor on 2026-10-29 at 04:55 UTC sent **601** notifications per buffer. The last held 3 records followed by 14 zero bytes, and the trailer CRC covers exactly 12006 bytes (6003 records). **Verified.**
 
-The buffer is not a fixed 6000 records. Compared with the capture, the 04:55 download had dropped the 14 oldest records and added 17 new ones.
+The buffer is not a fixed 6000 records. Compared with the first capture, the app's sync at 01:23 EDT had dropped the 16 oldest records and added 17 new ones (6001). The app's own sync also sent 601 notifications, so the app doesn't stop at 600 either.
 
 | Buffer | Record | Example |
 |---|---|---|
@@ -133,7 +133,7 @@ The records stream has no end marker. The app sent the trailer request 65 ms aft
 
 This library collects records until none has arrived for 2 s. It then requests the trailer and keeps the longest prefix whose CRC matches it, which drops the zero padding (at most 9 records). If no prefix matches, records were lost and the download fails.
 
-The Inkbird app showed Min 23.97 °C and Max 35.82 °C for the day. Those are the min and max of the newest 94–190 records. Its chart covered 16:50–22:28, about 338 minutes, and matched the newest ~44 records, which suggests records about 8 minutes apart (see [Timestamps](#timestamps)).
+The Inkbird app showed Min 23.97 °C and Max 35.82 °C for the day. Those are the min and max of the newest 94–190 records. Its chart, like its export, interpolates between records dated as described in [Timestamps](#timestamps).
 
 ### Trailer
 
@@ -141,15 +141,25 @@ The Inkbird app showed Min 23.97 °C and Max 35.82 °C for the day. Those are th
 
 ### Timestamps
 
-**The interval between history records is not known yet.**
+Records carry no time, and the sensor keeps no clock: neither the app nor the sensor wrote a time in any capture. The sensor takes a sample every 120 s and stores a history record **about every 10 minutes**. **Verified.**
 
-- The sensor samples every 120 s. `FFF1` byte 7 reads `0x78` (120), and `FFF5` went up 6 times in 12 minutes, on average every 119.8 s. **Observed.**
-- History records are stored less often. Between the capture (02:27:34 UTC) and the next download (04:54:47 UTC), 17 records were added in 147 minutes. That means one record every 8.2–9.2 minutes, not 120 s. **Verified.**
-- The app's chart (16:50–22:28 for the newest ~44 records) also suggests about 8 minutes.
+- `FFF1` byte 7 reads `0x78` (120), and `FFF5` went up 6 times in 12 minutes, on average every 119.8 s.
+- Between the first capture (2026-10-28 22:27:34 EDT) and the app's next sync (2026-10-29 01:23:11 EDT), 17 records were added in 175.6 minutes, one every 10.3 minutes.
+- The app's export (below) places 298 records over 49.4 hours, 6 per hour.
 
-The sensor may store every 4th sample (8 minutes), with some samples lost while connected, but this needs a measurement over several hours with the sensor left alone. Requests to `FFF8` hold back the sampling timer (see below), so polling the header can't measure it.
+**How the Inkbird app dates records.** On 2026-10-29 the app exported its data for this sensor as `IBS-THS-2026-10-29.csv` (in `Tests/InkbirdTests/Resources`). The file is UTF-16 and tab separated, with three header lines, and has one row every 2 minutes, newest first. Most rows are linear interpolations between records. Each of the 298 records of the sync at 01:23:11 that fall in the export's range is at a row with exactly its temperature and humidity. **Verified.**
 
-The library currently dates the newest record as the time of the download and each older one `FFF1`'s interval earlier. **This spaces the records too closely.** It reads the interval as a uint16 LE from `FFF1` bytes 7–8. Byte 8 has only been seen as `00`, so it could also be a separate field.
+- The app places records **in pairs 2 minutes apart, every 20 minutes**: at :00 and :02, :20 and :22, :40 and :42 local time.
+- The newest record gets the latest of these slots at or before the sync, here 01:22. Older records alternate 2 and 18 minutes earlier.
+- It re-dates all records from each new sync: the first capture's newest record (26.96 °C), synced at 22:27, is shown at 22:40.
+
+The library dates records the same way (`InkbirdHistoryReading.dates(count:end:calendar:)`), and a test checks it against the export. These are the app's dates, not the sensor's. Whether the sensor really stores two records 2 minutes apart every 20 minutes, or one every 10 minutes, isn't known.
+
+The library reads the sampling interval as a uint16 LE from `FFF1` bytes 7–8. Byte 8 has only been seen as `00`, so it could also be a separate field.
+
+### Unsaved records
+
+Records added during a session without the app may not last. A download at 01:07 EDT ended with 4 records (27.22, 27.24, 27.37, 27.37 °C) that weren't in the app's sync at 01:23. That sync instead had 2 new records after the last record they shared. Four connections had requested history in between, none of them writing `06` to `FFF9`. Possibly each history request appends the current reading as a temporary record, which the app's `FFF9` `06` keeps and a later sample replaces. In contrast, the first capture's newest records, followed by the app's `06`, were still there at 01:23. **Observed.**
 
 ### Record counter (`FFF5`)
 
@@ -181,7 +191,8 @@ PureSwift `GATT` buffers 100 notifications per subscription. At the sensor's pac
 
 ## 6. Open questions
 
-- **The history record interval** (see [Timestamps](#timestamps)).
+- Does the sensor store pairs of records every 20 minutes, as the app's dates suggest, or one every 10 minutes?
+- What makes the newest records temporary, and what does `FFF9` `06` do (see [Unsaved records](#unsaved-records))?
 - Fetching only new records: every download so far sent the whole buffer. A client can find the new records by matching the end of its previous download.
 - What does a sensor with much less stored history send?
 - What exactly does the header mean? Its offset of 24000 from the record count is unexplained.
