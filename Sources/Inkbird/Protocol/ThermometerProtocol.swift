@@ -45,9 +45,9 @@ public extension InkbirdReading {
 /// Settings from the `cfg data` characteristic (`FFF1`).
 public struct InkbirdSettings: Equatable, Hashable, Sendable {
 
-    /// Time between samples, in seconds. The record counter (`FFF5`) goes up at this rate.
+    /// Time between samples, in seconds. The sample counter (`FFF5`) goes up at this rate.
     ///
-    /// History records were stored less often than this on a real sensor. Read from bytes 7–8;
+    /// History records are stored less often, about every 10 minutes. Read from bytes 7–8;
     /// only `120` has been seen, so whether the field is one or two bytes is unconfirmed.
     public let interval: UInt16
 
@@ -162,8 +162,7 @@ internal enum InkbirdHistoryReply {
 /// Reading from the sensor's history.
 public struct InkbirdHistoryReading: Equatable, Hashable, Sendable {
 
-    /// Estimated time of the reading. Records carry no timestamp, so this is derived from the download time
-    /// and the logging interval, and can be up to one interval late.
+    /// Time of the reading, as the Inkbird app assigns it. Records carry no timestamp; see ``dates(count:end:calendar:)``.
     public let date: Date
 
     /// Temperature in degrees Celsius.
@@ -177,13 +176,13 @@ public extension InkbirdHistoryReading {
 
     /// Combines the record bytes of both buffers, oldest first.
     ///
-    /// - Parameter end: Date of the newest record, usually the time of the download.
-    /// - Parameter interval: Time between records.
+    /// - Parameter end: Time of the download.
+    /// - Parameter calendar: Calendar whose time zone places the 20-minute slots.
     static func decode(
         temperature: [UInt8],
         humidity: [UInt8],
         end: Date,
-        interval: TimeInterval
+        calendar: Calendar = .current
     ) -> [InkbirdHistoryReading] {
         let temperatures = stride(from: 0, to: temperature.count - 1, by: 2).map {
             Int16(bitPattern: UInt16(littleEndian: UInt16(bytes: (temperature[$0], temperature[$0 + 1]))))
@@ -193,12 +192,42 @@ public extension InkbirdHistoryReading {
         }
         // both buffers end with the newest record
         let count = min(temperatures.count, humidities.count)
+        let dates = self.dates(count: count, end: end, calendar: calendar)
         return zip(temperatures.suffix(count), humidities.suffix(count)).enumerated().map { index, record in
             InkbirdHistoryReading(
-                date: end.addingTimeInterval(-Double(count - 1 - index) * interval),
+                date: dates[index],
                 temperature: Float(record.0) / 100,
                 humidity: Float(record.1) / 100
             )
         }
+    }
+    
+    /// Dates of `count` records, oldest first, as the Inkbird app assigns them.
+    ///
+    /// The app places records in pairs two minutes apart, every 20 minutes: at :00 and :02, :20 and :22,
+    /// and :40 and :42. The newest record gets the latest of these slots at or before the download.
+    /// The sensor stores records about every 10 minutes on average, but keeps no time,
+    /// so these dates follow the app rather than the sensor's clock.
+    static func dates(count: Int, end: Date, calendar: Calendar = .current) -> [Date] {
+        guard count > 0 else {
+            return []
+        }
+        let components = calendar.dateComponents([.minute, .second, .nanosecond], from: end)
+        let intoBlock = TimeInterval((components.minute ?? 0) % 20 * 60 + (components.second ?? 0))
+            + TimeInterval(components.nanosecond ?? 0) / 1_000_000_000
+        // start of the 20-minute block, then the second slot of the pair if it has passed
+        var slot = end.addingTimeInterval(-intoBlock)
+        var isSecond = intoBlock >= 120
+        if isSecond {
+            slot = slot.addingTimeInterval(120)
+        }
+        var dates = [Date]()
+        dates.reserveCapacity(count)
+        for _ in 0 ..< count {
+            dates.append(slot)
+            slot = slot.addingTimeInterval(isSecond ? -120 : -1080)
+            isSecond.toggle()
+        }
+        return dates.reversed()
     }
 }
