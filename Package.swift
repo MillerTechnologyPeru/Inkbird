@@ -58,6 +58,9 @@ let package = Package(
                     package: "Bluetooth",
                     condition: .when(platforms: [.macOS, .linux])
                 )
+            ],
+            resources: [
+                .copy("Resources")
             ]
         )
     ]
