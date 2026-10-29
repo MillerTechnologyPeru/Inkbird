@@ -109,9 +109,12 @@ public actor InkbirdConnection<Central: CentralManager> where Central: Sendable,
         }
     }
 
-    /// Downloads the stored history: about 8 days of readings at the default 2-minute interval.
+    /// Downloads the stored history: about 6000 readings per buffer.
     ///
     /// A full download takes about 90 seconds.
+    ///
+    /// - Warning: Dates assume records are ``InkbirdSettings/interval`` apart, but a real sensor
+    /// stored them about 8–9 minutes apart while sampling every 120 s. See `Docs/BLE-Protocol.md`.
     ///
     /// - Parameter timeout: Time allowed for each reply, and between records.
     public func history(timeout: TimeInterval = 5) async throws -> [InkbirdHistoryReading] {
@@ -174,11 +177,14 @@ private extension InkbirdConnection {
 
         let id: UInt64
 
-        /// Notifications to wait for.
-        let count: Int
+        /// Notifications to wait for, or `nil` to collect until the device goes quiet.
+        let count: Int?
 
-        /// Whether to return the notifications received so far if the device goes quiet.
-        let allowsFewer: Bool
+        /// Time allowed after each notification.
+        let quiet: TimeInterval
+
+        /// The request ends if no notification arrives by then.
+        var deadline: Date
 
         var frames = [[UInt8]]()
 
@@ -230,24 +236,28 @@ private extension InkbirdConnection {
             throw InkbirdConnectionError.invalidData(.inkbirdHistoryData)
         }
         // records arrive 10 to a notification, with no end marker
-        let frameCount = InkbirdHistoryBuffer.capacity * InkbirdHistoryBuffer.recordSize / 20
-        let frames = try await collect(frameCount, for: buffer.records, allowsFewer: true, timeout: timeout)
-        let records = Array(frames.joined())
+        let frames = try await collect(nil, for: buffer.records, timeout: timeout)
         let reply = try await collect(1, for: buffer.checksum, timeout: timeout)
         guard let checksum = InkbirdHistoryReply.checksum(reply[0]) else {
             throw InkbirdConnectionError.invalidData(.inkbirdHistoryData)
         }
-        guard UInt16(crc16Modbus: records) == checksum else {
+        // the last notification is padded with zeros, which the checksum leaves out
+        guard let records = InkbirdHistoryReply.records(Array(frames.joined()), checksum: checksum) else {
             throw InkbirdConnectionError.checksumMismatch
         }
         return records
     }
 
+    /// Time without a notification after which a stream of records is complete.
+    /// Records arrive about 30 ms apart; the longest gap seen was 0.21 s.
+    static var quietPeriod: TimeInterval { 2 }
+
     /// Writes a history request and collects the notifications it causes.
+    ///
+    /// - Parameter count: Notifications to wait for, or `nil` to collect until the device goes quiet.
     func collect(
-        _ count: Int,
+        _ count: Int?,
         for request: InkbirdHistoryRequest,
-        allowsFewer: Bool = false,
         timeout: TimeInterval
     ) async throws -> [[UInt8]] {
         let characteristic = try characteristic(.inkbirdHistoryRequest)
@@ -256,7 +266,13 @@ private extension InkbirdConnection {
         let central = self.central
         return try await withCheckedThrowingContinuation { continuation in
             // notifications can arrive before the write returns
-            collector = Collector(id: id, count: count, allowsFewer: allowsFewer, continuation: continuation)
+            collector = Collector(
+                id: id,
+                count: count,
+                quiet: count == nil ? min(timeout, Self.quietPeriod) : timeout,
+                deadline: Date().addingTimeInterval(timeout),
+                continuation: continuation
+            )
             Task {
                 do {
                     try await central.writeValue(Central.Data([request.rawValue]), for: characteristic, withResponse: true)
@@ -266,23 +282,28 @@ private extension InkbirdConnection {
                 }
             }
             Task {
-                await self.watchCollector(id, timeout: timeout)
+                await self.watchCollector(id)
             }
         }
     }
 
-    /// Ends the request if no notification arrives within the timeout.
-    func watchCollector(_ id: UInt64, timeout: TimeInterval) async {
-        var count = -1
-        while let collector, collector.id == id, collector.frames.count != count {
-            count = collector.frames.count
-            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+    /// Ends the request when no notification arrives in time: the timeout before the first one,
+    /// then the quiet period while collecting records.
+    func watchCollector(_ id: UInt64) async {
+        while let collector, collector.id == id {
+            let remaining = collector.deadline.timeIntervalSinceNow
+            guard remaining > 0 else {
+                break
+            }
+            // notifications move the deadline, so check again well before it
+            let wait = min(remaining, collector.quiet / 4)
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
         }
         guard let collector, collector.id == id else {
             return
         }
-        if collector.allowsFewer, collector.frames.isEmpty == false {
-            finishCollector(id, .success(collector.frames))
+        if collector.count == nil {
+            finishCollector(id, .success(collector.frames)) // an empty buffer may send nothing
         } else {
             finishCollector(id, .failure(InkbirdConnectionError.timeout))
         }
@@ -318,8 +339,9 @@ private extension InkbirdConnection {
             return
         }
         collector.frames.append(bytes)
+        collector.deadline = Date().addingTimeInterval(collector.quiet)
         self.collector = collector
-        if collector.frames.count >= collector.count {
+        if let count = collector.count, collector.frames.count >= count {
             finishCollector(collector.id, .success(collector.frames))
         }
     }
