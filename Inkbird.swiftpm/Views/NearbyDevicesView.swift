@@ -97,8 +97,10 @@ extension NearbyDevicesView {
     
     var list: some View {
         List {
-            ForEach(items) {
-                InkbirdAdvertisementRow(advertisement: $0.advertisement)
+            ForEach(items) { item in
+                NavigationLink(destination: SensorDetailView(peripheral: item.id)) {
+                    InkbirdAdvertisementRow(advertisement: item.advertisement)
+                }
             }
         }
     }
